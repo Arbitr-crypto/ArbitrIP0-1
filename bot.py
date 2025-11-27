@@ -1,151 +1,243 @@
-# bot.py
-
+import os
 import asyncio
-import ccxt
+import sqlite3
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import ccxt.async_support as ccxt
 
-# --------------------------
-# Настройки
-# --------------------------
+# -------------------------
+# Токены и ID
+# -------------------------
+TELEGRAM_TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"
+OWNER_CHAT_ID = 6590452577
+OPERATOR_ID = 8193755967
 
-TELEGRAM_TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"      # <- Вставьте сюда токен бота
-OWNER_CHAT_ID = 6590452577                       # <- Вставьте сюда ваш ID владельца
-OPERATOR_ID = 8193755967                          # <- Вставьте сюда ID оператора
-EXCHANGES_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
+# -------------------------
+# Настройки арбитража
+# -------------------------
+SPREAD_THRESHOLD = 1.5          # %
+MIN_VOLUME_USD = 1500           # Минимальный объем USDT
+MAX_COINS = 150
+CHECK_INTERVAL = 60             # секунд
+USDT_PAIRS_ONLY = True
 
-SPREAD_THRESHOLD = 0.015   # минимальный спред 1.5%
-MIN_VOLUME_USD = 1500      # минимальный объем
-MAX_COINS = 150            # макс. количество монет для сканирования
-CHECK_INTERVAL = 60        # интервал проверки в секундах
+EXCHANGES = ["bitrue", "bitmart", "poloniex", "kucoin", "gateio"]
 
-# --------------------------
-# Whitelist
-# --------------------------
+# -------------------------
+# База данных SQLite
+# -------------------------
+DB_FILE = "arbi_data.db"
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cur = conn.cursor()
 
-whitelist = set()  # пустой сет, добавляем telegram_id через add_whitelist
+cur.execute("""
+CREATE TABLE IF NOT EXISTS whitelist (
+    tg_id INTEGER PRIMARY KEY,
+    added_by INTEGER,
+    added_at TEXT
+)
+""")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    buy_ex TEXT,
+    sell_ex TEXT,
+    spread REAL,
+    volume REAL,
+    detected_at TEXT
+)
+""")
+conn.commit()
 
-def add_whitelist(tg_id):
-    whitelist.add(tg_id)
+# -------------------------
+# Whitelist функции
+# -------------------------
+def is_whitelisted(tg_id: int) -> bool:
+    cur.execute("SELECT 1 FROM whitelist WHERE tg_id=?", (tg_id,))
+    return cur.fetchone() is not None
 
-def remove_whitelist(tg_id):
-    whitelist.discard(tg_id)
+def add_whitelist(tg_id: int, added_by: int):
+    cur.execute(
+        "INSERT OR REPLACE INTO whitelist (tg_id, added_by, added_at) VALUES (?, ?, ?)",
+        (tg_id, added_by, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
 
-def is_whitelisted(tg_id):
-    return tg_id in whitelist
+def remove_whitelist(tg_id: int):
+    cur.execute("DELETE FROM whitelist WHERE tg_id=?", (tg_id,))
+    conn.commit()
 
-# --------------------------
-# Инициализация бирж
-# --------------------------
+def list_whitelist():
+    cur.execute("SELECT tg_id, added_by, added_at FROM whitelist")
+    return cur.fetchall()
 
-exchanges = {}
-for ex_id in EXCHANGES_IDS:
-    ex_id = ex_id.strip()
-    if ex_id:
-        ex_cls = getattr(ccxt, ex_id)
-        exchanges[ex_id] = ex_cls({'enableRateLimit': True})
-
-# --------------------------
-# Логика сканера
-# --------------------------
-
-scanner_task = None
+# -------------------------
+# Сканер
+# -------------------------
 scanner_running = False
 
-def is_valid_symbol(symbol):
-    if not symbol.endswith("/USDT"):
-        return False
-    bad_keywords = ['3S','3L','UP','DOWN','BULL','BEAR','ETF','HALF','MOON','INVERSE']
-    for b in bad_keywords:
-        if b in symbol.upper():
-            return False
-    base = symbol.split("/")[0]
-    return 2 <= len(base) <= 20
-
-async def orderbook_volume_usd_async(exchange, symbol):
+async def fetch_orderbook(exch, symbol):
     try:
-        ob = await asyncio.to_thread(exchange.fetch_order_book, symbol, 5)
-        bid_vol = sum([p*a for p,a in ob.get('bids', [])[:3]])
-        ask_vol = sum([p*a for p,a in ob.get('asks', [])[:3]])
-        return max(bid_vol, ask_vol)
-    except:
-        return 0.0
+        ob = await exch.fetch_order_book(symbol)
+        return ob
+    except Exception as e:
+        return None
 
-async def scan_arbitrage(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = OWNER_CHAT_ID
-    for ex_a_name, ex_a in exchanges.items():
+async def check_arbitrage():
+    # Создаем экземпляры бирж
+    exchange_objects = {name: getattr(ccxt, name)() for name in EXCHANGES}
+    symbols_checked = set()
+    signals = []
+
+    # Получаем все пары USDT и ликвидные
+    for ex_name, ex_obj in exchange_objects.items():
         try:
-            markets = await asyncio.to_thread(ex_a.load_markets)
-            symbols = [s for s in markets.keys() if is_valid_symbol(s)][:MAX_COINS]
-            for symbol in symbols:
-                vol = await orderbook_volume_usd_async(ex_a, symbol)
-                if vol < MIN_VOLUME_USD:
+            markets = await ex_obj.load_markets()
+            for symbol, data in markets.items():
+                if USDT_PAIRS_ONLY and "USDT" not in symbol:
                     continue
-                price_a = ex_a.fetch_ticker(symbol)['bid']
-                for ex_b_name, ex_b in exchanges.items():
-                    if ex_b_name == ex_a_name:
-                        continue
-                    price_b = ex_b.fetch_ticker(symbol)['ask']
-                    spread = price_a / price_b - 1
-                    if spread >= SPREAD_THRESHOLD:
-                        msg = (f"🟢 Арбитраж найден!\n"
-                               f"{symbol}\n"
-                               f"BUY: {ex_b_name} @ {price_b}\n"
-                               f"SELL: {ex_a_name} @ {price_a}\n"
-                               f"Spread: {spread*100:.2f}%\n"
-                               f"Объем: {vol:.2f} USD")
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-        except Exception as e:
-            print(f"Ошибка при сканировании {ex_a_name}: {e}")
+                if data.get("active") != True:
+                    continue
+                if data.get("info", {}).get("quoteVolume", 0) < MIN_VOLUME_USD:
+                    continue
+                symbols_checked.add(symbol)
+        except:
+            continue
 
-# --------------------------
-# Telegram Bot
-# --------------------------
+    # Ограничиваем кол-во монет
+    symbols_checked = list(symbols_checked)[:MAX_COINS]
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_whitelisted(update.effective_user.id):
-        await update.message.reply_text("❌ Вы не в whitelist")
+    # Проверяем спреды
+    for symbol in symbols_checked:
+        best_bid = 0
+        best_bid_ex = ""
+        best_ask = float('inf')
+        best_ask_ex = ""
+
+        for ex_name, ex_obj in exchange_objects.items():
+            ob = await fetch_orderbook(ex_obj, symbol)
+            if not ob: 
+                continue
+            if ob['bids']:
+                top_bid = ob['bids'][0][0]
+                if top_bid > best_bid:
+                    best_bid = top_bid
+                    best_bid_ex = ex_name
+            if ob['asks']:
+                top_ask = ob['asks'][0][0]
+                if top_ask < best_ask:
+                    best_ask = top_ask
+                    best_ask_ex = ex_name
+
+        if best_bid_ex != best_ask_ex and best_bid > best_ask:
+            spread_percent = ((best_bid - best_ask)/best_ask)*100
+            volume = min(
+                [ob['bids'][0][1] if ob and ob['bids'] else 0 for ob in [await fetch_orderbook(exchange_objects[ex], symbol) for ex in EXCHANGES]]
+            )
+            if spread_percent >= SPREAD_THRESHOLD and volume*best_ask >= MIN_VOLUME_USD:
+                signals.append({
+                    "symbol": symbol,
+                    "buy_ex": best_ask_ex,
+                    "sell_ex": best_bid_ex,
+                    "spread": round(spread_percent,2),
+                    "volume": round(volume,2)
+                })
+
+    # Закрываем биржи
+    for ex_obj in exchange_objects.values():
+        await ex_obj.close()
+
+    return signals
+
+async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
+    if not scanner_running:
         return
+    rows = list_whitelist()
+    if not rows:
+        return
+    signals = await check_arbitrage()
+    for signal in signals:
+        for (tg_id,) in rows:
+            await context.bot.send_message(
+                chat_id=tg_id,
+                text=f"🔥 Арбитражный сигнал!\nМонета: {signal['symbol']}\nКупить: {signal['buy_ex']}\nПродать: {signal['sell_ex']}\nСпред: {signal['spread']}%\nОбъём: {signal['volume']} USDT"
+            )
+
+# -------------------------
+# Telegram команды и кнопки
+# -------------------------
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global scanner_running
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Старт сканера", callback_data="start_scanner")],
         [InlineKeyboardButton("Стоп сканера", callback_data="stop_scanner")],
         [InlineKeyboardButton("Поддержка", url="https://t.me/Arbitr_IP")]
     ])
-    await update.message.reply_text("Выберите действие:", reply_markup=keyboard)
+    await update.message.reply_text(
+        "Добро пожаловать! Используй кнопки ниже для управления сканером.",
+        reply_markup=keyboard
+    )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global scanner_task, scanner_running
+async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    caller = update.effective_user.id
+    if caller not in (OWNER_CHAT_ID, OPERATOR_ID):
+        await update.message.reply_text("🚫 Только владелец или оператор могут управлять whitelist.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /add_user <tg_id>")
+        return
+    tg_id = int(context.args[0])
+    add_whitelist(tg_id, caller)
+    await update.message.reply_text(f"✅ Пользователь {tg_id} добавлен в whitelist.")
+
+async def cmd_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    caller = update.effective_user.id
+    if caller not in (OWNER_CHAT_ID, OPERATOR_ID):
+        await update.message.reply_text("🚫 Только владелец или оператор могут управлять whitelist.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /remove_user <tg_id>")
+        return
+    tg_id = int(context.args[0])
+    remove_whitelist(tg_id)
+    await update.message.reply_text(f"✅ Пользователь {tg_id} удалён из whitelist.")
+
+async def cmd_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    caller = update.effective_user.id
+    if caller not in (OWNER_CHAT_ID, OPERATOR_ID):
+        await update.message.reply_text("🚫 Только владелец или оператор могут просматривать whitelist.")
+        return
+    rows = list_whitelist()
+    if not rows:
+        await update.message.reply_text("Whitelist пуст.")
+        return
+    txt = "Whitelist:\n" + "\n".join([f"{r[0]} (added_by={r[1]}) at {r[2]}" for r in rows])
+    await update.message.reply_text(txt)
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global scanner_running
     query = update.callback_query
     await query.answer()
-    data = query.data
-    if data == "start_scanner":
-        if not scanner_running:
-            scanner_task = context.job_queue.run_repeating(scan_arbitrage, interval=CHECK_INTERVAL, first=0)
-            scanner_running = True
-            await query.message.reply_text("✅ Сканер запущен!")
-        else:
-            await query.message.reply_text("Сканер уже запущен")
-    elif data == "stop_scanner":
-        if scanner_running:
-            scanner_task.schedule_removal()
-            scanner_running = False
-            await query.message.reply_text("⏹️ Сканер остановлен")
-        else:
-            await query.message.reply_text("Сканер не запущен")
+    if query.data == "start_scanner":
+        scanner_running = True
+        await query.message.reply_text("✅ Сканер запущен!")
+    elif query.data == "stop_scanner":
+        scanner_running = False
+        await query.message.reply_text("⛔ Сканер остановлен!")
 
-# --------------------------
-# Главная функция
-# --------------------------
-
+# -------------------------
+# Основной запуск
+# -------------------------
 def main():
-    # Добавляем владельца и оператора в whitelist
-    add_whitelist(OWNER_CHAT_ID)
-    add_whitelist(OPERATOR_ID)
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(CommandHandler("add_user", cmd_add_user))
+    app.add_handler(CommandHandler("remove_user", cmd_remove_user))
+    app.add_handler(CommandHandler("list_users", cmd_list_users))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.job_queue.run_repeating(scanner_job, interval=CHECK_INTERVAL, first=5)
     print("Бот запущен...")
     app.run_polling()
 
