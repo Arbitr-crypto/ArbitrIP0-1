@@ -143,7 +143,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------
 async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
     print("Выполняю скан...")
-    # Здесь будет логика
+    # Здесь будет логика сканирования
     return
 
 
