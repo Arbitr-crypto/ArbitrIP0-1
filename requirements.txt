@@ -1,4 +1,4 @@
-python-telegram-bot==21.3
-ccxt==4.3.92
-numpy
-pandas
+python-telegram-bot==20.7
+ccxt==2.2.96
+numpy==2.3.5
+pandas==2.3.3
