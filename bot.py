@@ -230,16 +230,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 # Основной запуск
 # -------------------------
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("add_user", cmd_add_user))
-    app.add_handler(CommandHandler("remove_user", cmd_remove_user))
-    app.add_handler(CommandHandler("list_users", cmd_list_users))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.job_queue.run_repeating(scanner_job, interval=CHECK_INTERVAL, first=5)
-    print("Бот запущен...")
-    app.run_polling()
+app = Application.builder().token(BOT_TOKEN).build()
+
+# включаем job_queue
+job_queue = app.job_queue
+job_queue.run_repeating(scanner_job, interval=CHECK_INTERVAL, first=5)
 
 if __name__ == "__main__":
     main()
