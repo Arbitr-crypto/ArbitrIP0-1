@@ -1,24 +1,15 @@
 #!/bin/bash
-# ===============================
-# stats.sh - запуск Telegram бота
-# ===============================
 
-# Включаем строгий режим, чтобы ловить ошибки
-set -e
+echo "==============================="
+echo "   ЗАПУСК TELEGRAM БОТА"
+echo "==============================="
 
-# Активируем виртуальное окружение, если оно есть
-if [ -d "./venv" ]; then
-    echo "Активируем виртуальное окружение..."
-    source ./venv/bin/activate
-else
-    echo "Виртуальное окружение не найдено. Создаем новое..."
-    python3 -m venv venv
-    source ./venv/bin/activate
-    echo "Устанавливаем зависимости..."
-    pip install --upgrade pip
-    pip install -r requirements.txt
-fi
+# Бесконечный автоперезапуск
+while true
+do
+    echo "Бот запускается..."
+    python3 bot.py >> bot.log 2>&1
 
-# Запуск бота
-echo "Запуск бота..."
-python3 bot.py
+    echo "Бот упал или завершился. Перезапуск через 3 секунды..."
+    sleep 3
+done
