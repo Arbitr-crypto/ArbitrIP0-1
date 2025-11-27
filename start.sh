@@ -1,11 +1,24 @@
 #!/bin/bash
-# активируем виртуальное окружение
-python3 -m venv /opt/venv
-source /opt/venv/bin/activate
+# ===============================
+# stats.sh - запуск Telegram бота
+# ===============================
 
-# устанавливаем зависимости
-pip install --upgrade pip
-pip install -r requirements.txt
+# Включаем строгий режим, чтобы ловить ошибки
+set -e
 
-# запускаем бота
-python bot.py
+# Активируем виртуальное окружение, если оно есть
+if [ -d "./venv" ]; then
+    echo "Активируем виртуальное окружение..."
+    source ./venv/bin/activate
+else
+    echo "Виртуальное окружение не найдено. Создаем новое..."
+    python3 -m venv venv
+    source ./venv/bin/activate
+    echo "Устанавливаем зависимости..."
+    pip install --upgrade pip
+    pip install -r requirements.txt
+fi
+
+# Запуск бота
+echo "Запуск бота..."
+python3 bot.py
