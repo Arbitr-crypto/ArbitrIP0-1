@@ -10,10 +10,15 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, CommandHandler, CallbackQueryHandler,
                           ContextTypes)
 from dotenv import load_dotenv
+
 load_dotenv()
 
+# Получаем токен Telegram бота и ID чата из переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
+TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)  # Default 0 если не указан
+
+# Остальной код без изменений...
+
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
 MAX_COINS = 150
 SPREAD_THRESHOLD = 0.015
