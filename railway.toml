@@ -3,3 +3,8 @@ builder = "nixpacks" # или любой другой builder, который в
 
 [nixpacks]
 pythonVersion = "3.10"
+[build]
+builder = "nixpacks"
+
+[nixpacks]
+pythonVersion = "3.10"
