@@ -1,7 +1,3 @@
-python
-
-Копировать
-
 import os
 
 import asyncio
