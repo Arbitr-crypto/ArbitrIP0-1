@@ -30,9 +30,9 @@ from telegram.ext import (
 
 # ================== CONFIG ==================
 
-TELEGRAM_TOKEN = os.environ.get("8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-TARGET_CHAT_ID = int(os.environ.get("6590452577") or 0) # Default to 0, ensure it's set
+TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0) # Default to 0, ensure it's set
 
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
 
