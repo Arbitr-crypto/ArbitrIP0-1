@@ -1,20 +1,12 @@
 # bot.py
-import os
 import sqlite3
 from datetime import datetime, timezone
 import logging
 import asyncio
-import nest_asyncio
 import ccxt
 import pandas as pd
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ========== CONFIG ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")
