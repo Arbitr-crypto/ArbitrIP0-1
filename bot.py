@@ -13,8 +13,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Получаем токен Telegram бота и ID чата из переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
+TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)  # Default 0 если не указан
+
+# Остальной код без изменений...
+
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
 MAX_COINS = 150
 SPREAD_THRESHOLD = 0.015
@@ -35,7 +39,7 @@ cur.execute(""" CREATE TABLE IF NOT EXISTS signals ( id INTEGER PRIMARY KEY AUTO
 conn.commit()
 
 def save_signal(symbol, buy_ex, sell_ex, spread):
-    cur.execute( "INSERT INTO SIGNALS (SYMBOL, BUY_EX, SELL_EX, SPREAD, CREATED_AT) VALUES (?, ?, ?, ?, ?)",
+    cur.execute( "INSERT INTO signals (symbol, buy_ex, sell_ex, spread, created_at) VALUES (?, ?, ?, ?, ?)",
         (symbol, buy_ex, sell_ex, float(spread), datetime.now(timezone.utc).isoformat()))
     conn.commit()
 
@@ -46,11 +50,11 @@ def last_signal(symbol, buy_ex, sell_ex):
 
 exchanges: Dict[str, ccxt.Exchange] = {}
 async def initialize_exchanges():
-    global exchanges # Make sure we modifying the global var
+    global exchanges
     for ex_id in EXCHANGE_IDS:
         try:
             ex_cls = getattr(ccxt, ex_id)
-            exchanges[ex_id] = ex_cls({"enableRateLimit": True}) # Remove asyncio_loop here
+            exchanges[ex_id] = ex_cls({"enableRateLimit": True}) # <- Убрал asyncio_loop
             logger.info("%s client created", ex_id)
         except Exception as e:
             logger.warning("Cannot init %s: %s", ex_id, e)
@@ -66,7 +70,7 @@ def is_valid_symbol(sym: str) -> bool:
 
 def orderbook_volume_usd_sync(exchange: ccxt.Exchange, symbol: str) -> float:
     try:
-        ob = exchange.fetch_order_book(symbol, symbol=symbol, limit=5)
+        ob = exchange.fetch_order_book(symbol, limit=5)
         bid_vol = sum([p * a for p, a in ob.get('bids', [])[:3]])
         ask_vol = sum([p * a for p, a in ob.get('asks', [])[:3]])
         return max(bid_vol, ask_vol)
@@ -93,7 +97,7 @@ async def check_deposit_withdraw(exchange: ccxt.Exchange, currency_code: str) ->
         withdraw_ok = True
 
     try:
-        currencies = await asyncio.to_thread(exchange.fetch_currencies) #  getattr(exchange, 'fetch_currencies', lambda: {})
+        currencies = await asyncio.to_thread(getattr(exchange, 'fetch_currencies', lambda: {}))
         if currencies and isinstance(currencies, dict):
             cur_info = currencies.get(currency_code) or currencies.get(currency_code.upper()) or currencies.get(currency_code.lower())
             if isinstance(cur_info, dict):
@@ -225,7 +229,7 @@ async def main():
         scanner_task.cancel()
 
     except Exception as e:
-        logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True, stack_info=True, exc_info=True)
+        logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True) # <- Исправил. Убрал повтор exc_info
     finally:
         try:
              await application.shutdown()
