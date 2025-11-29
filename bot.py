@@ -4,20 +4,26 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Tuple
 import ccxt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-                          ContextTypes)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Получаем токен Telegram бота и ID чата из переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)  # Default 0 если не указан
+TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
 
-# Остальной код без изменений...
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN не задан в .env")
+if TARGET_CHAT_ID == 0:
+    raise RuntimeError("TARGET_CHAT_ID не задан в .env")
 
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
 MAX_COINS = 150
@@ -34,207 +40,273 @@ DB_FILE = "arbi_signals.db"
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cur = conn.cursor()
 
-cur.execute(""" CREATE TABLE IF NOT EXISTS signals ( id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT, buy_ex TEXT, sell_ex TEXT, spread REAL, created_at TEXT ) """)
+cur.execute("""
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    buy_ex TEXT,
+    sell_ex TEXT,
+    spread REAL,
+    created_at TEXT
+)
+""")
 conn.commit()
 
-def save_signal(symbol, buy_ex, sell_ex, spread):
-    cur.execute( "INSERT INTO signals (symbol, buy_ex, sell_ex, spread, created_at) VALUES (?, ?, ?, ?, ?)",
-        (symbol, buy_ex, sell_ex, float(spread), datetime.now(timezone.utc).isoformat()))
+
+def save_signal(symbol: str, buy_ex: str, sell_ex: str, spread: float):
+    cur.execute(
+        "INSERT INTO signals(symbol, buy_ex, sell_ex, spread, created_at) VALUES(?,?,?,?,?)",
+        (symbol, buy_ex, sell_ex, float(spread), datetime.now(timezone.utc).isoformat()),
+    )
     conn.commit()
 
-def last_signal(symbol, buy_ex, sell_ex):
-    cur.execute( "SELECT spread, created_at FROM signals WHERE symbol=? AND buy_ex=? AND sell_ex=? ORDER BY id DESC LIMIT 1",
-                (symbol, buy_ex, sell_ex))
+
+def last_signal(symbol: str, buy_ex: str, sell_ex: str):
+    cur.execute(
+        "SELECT spread, created_at FROM signals WHERE symbol=? AND buy_ex=? AND sell_ex=? ORDER BY id DESC LIMIT 1",
+        (symbol, buy_ex, sell_ex),
+    )
     return cur.fetchone()
 
+
 exchanges: Dict[str, ccxt.Exchange] = {}
+
+
 async def initialize_exchanges():
-    global exchanges
     for ex_id in EXCHANGE_IDS:
         try:
-            ex_cls = getattr(ccxt, ex_id)
-            exchanges[ex_id] = ex_cls({"enableRateLimit": True}) # <- Убрал asyncio_loop
-            logger.info("%s client created", ex_id)
+            cls = getattr(ccxt, ex_id)
+            exchanges[ex_id] = cls({"enableRateLimit": True})
+            logger.info("Exchange %s initialized", ex_id)
         except Exception as e:
-            logger.warning("Cannot init %s: %s", ex_id, e)
+            logger.error("Exchange init %s failed: %s", ex_id, e)
+
 
 def is_valid_symbol(sym: str) -> bool:
-    if not sym.endswith(SYMBOL_QUOTE): return False
-    bad = ['3S', '3L', 'UP', 'DOWN', 'BULL', 'BEAR', 'ETF', 'INVERSE']
-    up = sym.upper()
-    for b in bad:
-        if b in up: return False
+    if not sym.endswith(SYMBOL_QUOTE):
+        return False
+    bad = ["3S", "3L", "UP", "DOWN", "BULL", "BEAR", "ETF", "INVERSE"]
+    u = sym.upper()
+    if any(b in u for b in bad):
+        return False
     base = sym.split("/")[0]
     return 2 <= len(base) <= 20
+
+
+async def safe_fetch_order_book(exchange, symbol: str, limit=5):
+    try:
+        return await asyncio.to_thread(exchange.fetch_order_book, symbol, limit)
+    except Exception:
+        return None
+
 
 def orderbook_volume_usd_sync(exchange: ccxt.Exchange, symbol: str) -> float:
     try:
         ob = exchange.fetch_order_book(symbol, limit=5)
-        bid_vol = sum([p * a for p, a in ob.get('bids', [])[:3]])
-        ask_vol = sum([p * a for p, a in ob.get('asks', [])[:3]])
+        bids = ob.get("bids") or []
+        asks = ob.get("asks") or []
+        bid_vol = sum([p * a for p, a in bids[:3]])
+        ask_vol = sum([p * a for p, a in asks[:3]])
         return max(bid_vol, ask_vol)
     except Exception:
         return 0.0
 
-async def orderbook_volume_usd(exchange: ccxt.Exchange, symbol: str) -> float:
+
+async def orderbook_volume_usd(exchange, symbol):
     return await asyncio.to_thread(orderbook_volume_usd_sync, exchange, symbol)
 
-async def safe_fetch_order_book(exchange: ccxt.Exchange, symbol: str, limit=5):
-    try:
-        return await asyncio.to_thread(exchange.fetch_order_book, symbol, limit)
-    except Exception as e:
-        logger.debug("fetch_order_book %s@%s failed: %s", symbol, getattr(exchange, 'id', '?'), e)
-        return None
 
-async def check_deposit_withdraw(exchange: ccxt.Exchange, currency_code: str) -> (bool, bool, str):
-    try:
-        has = getattr(exchange, 'has', {}) or {}
-        deposit_ok = bool(has.get('deposit', None) is not False)
-        withdraw_ok = bool(has.get('withdraw', None) is not False)
-    except:
-        deposit_ok = True
-        withdraw_ok = True
+async def check_deposit_withdraw(exchange, currency: str) -> Tuple[bool, bool, str]:
+    deposit_ok, withdraw_ok = True, True
+    note = ""
 
     try:
-        currencies = await asyncio.to_thread(getattr(exchange, 'fetch_currencies', lambda: {}))
-        if currencies and isinstance(currencies, dict):
-            cur_info = currencies.get(currency_code) or currencies.get(currency_code.upper()) or currencies.get(currency_code.lower())
-            if isinstance(cur_info, dict):
-                if 'deposit' in cur_info: deposit_ok = bool(cur_info.get('deposit'))
-                if 'withdraw' in cur_info: withdraw_ok = bool(cur_info.get('withdraw'))
-                if 'active' in cur_info:
-                    active = cur_info.get('active')
-                    if active is False:
+        has = getattr(exchange, "has", {}) or {}
+        if has.get("deposit") is False:
+            deposit_ok = False
+        if has.get("withdraw") is False:
+            withdraw_ok = False
+    except Exception:
+        pass
+
+    try:
+        if hasattr(exchange, "fetch_currencies"):
+            currencies = await asyncio.to_thread(exchange.fetch_currencies)
+            if isinstance(currencies, dict):
+                info = (
+                    currencies.get(currency)
+                    or currencies.get(currency.upper())
+                    or currencies.get(currency.lower())
+                )
+                if isinstance(info, dict):
+                    if "deposit" in info:
+                        deposit_ok = bool(info["deposit"])
+                    if "withdraw" in info:
+                        withdraw_ok = bool(info["withdraw"])
+                    if info.get("active") is False:
                         deposit_ok = False
                         withdraw_ok = False
-    except Exception as e:
-        logger.debug("fetch_currencies failed on %s: %s", getattr(exchange, 'id', '?'), e)
+    except Exception:
+        pass
 
-    note = ""
-    if not deposit_ok: note += "deposit_disabled "
-    if not withdraw_ok: note += "withdraw_disabled"
+    if not deposit_ok:
+        note += "deposit_disabled "
+    if not withdraw_ok:
+        note += "withdraw_disabled"
+
     return deposit_ok, withdraw_ok, note.strip()
+
 
 _markets_cache = {}
 _markets_cache_time = 0
+
+
 async def load_markets_cached():
     global _markets_cache, _markets_cache_time
-    if time.time() - _markets_cache_time < MARKETS_CACHE_TTL and _markets_cache:
+
+    now = time.time()
+    if now - _markets_cache_time < MARKETS_CACHE_TTL and _markets_cache:
         return _markets_cache
-    data = {}
+
+    result = {}
     for name, ex in exchanges.items():
         try:
             markets = await asyncio.to_thread(ex.load_markets)
-            usdt_pairs = [s for s in markets.keys() if is_valid_symbol(s)]
-            data[name] = set(usdt_pairs)
-            logger.info("%s: %d /USDT pairs", name, len(usdt_pairs))
+            valid = [s for s in markets.keys() if is_valid_symbol(s)]
+            result[name] = set(valid)
         except Exception as e:
-            logger.warning("load_markets %s failed: %s", name, e)
-            data[name] = set()
-    _markets_cache = data
-    _markets_cache_time = time.time()
-    return data
+            logger.error("load_markets %s failed: %s", name, e)
+            result[name] = set()
+
+    _markets_cache = result
+    _markets_cache_time = now
+    return result
+
 
 scanner_running = False
-async def scanner_once(app):
-    markets_map = await load_markets_cached()
-    symbol_map = {}
-    for ex_name, pairs in markets_map.items():
-        for s in pairs:
-            symbol_map.setdefault(s, []).append(ex_name)
-    common_symbols = [s for s, exs in symbol_map.items() if len(exs) >= 2]
-    common_symbols = sorted(common_symbols)[:MAX_COINS]
-    logger.info("Selected %d common symbols", len(common_symbols))
 
-    for symbol in common_symbols:
+
+async def scanner_once(app):
+    markets = await load_markets_cached()
+
+    symbol_map = {}
+    for ex, pairs in markets.items():
+        for s in pairs:
+            symbol_map.setdefault(s, []).append(ex)
+
+    common = [s for s, lst in symbol_map.items() if len(lst) >= 2]
+    common = sorted(common)[:MAX_COINS]
+
+    logger.info("Checking %d symbols...", len(common))
+
+    for symbol in common:
         ex_list = symbol_map[symbol]
+
         for buy_ex in ex_list:
             for sell_ex in ex_list:
-                if buy_ex == sell_ex:  continue
-                buy_client = exchanges.get(buy_ex)
-                sell_client = exchanges.get(sell_ex)
-                if buy_client is None or sell_client is None: continue
+                if buy_ex == sell_ex:
+                    continue
 
-                ob_buy_task = asyncio.create_task(safe_fetch_order_book(buy_client, symbol))
-                ob_sell_task = asyncio.create_task(safe_fetch_order_book(sell_client, symbol))
-                ob_buy = await ob_buy_task
-                ob_sell = await ob_sell_task
+                ex_buy = exchanges[buy_ex]
+                ex_sell = exchanges[sell_ex]
 
-                if not ob_buy or not ob_sell: continue
-                if not ob_buy.get('asks') or not ob_sell.get('bids'): continue
+                ob_buy = await safe_fetch_order_book(ex_buy, symbol)
+                ob_sell = await safe_fetch_order_book(ex_sell, symbol)
+                if not ob_buy or not ob_sell:
+                    continue
 
-                ask_price, ask_amount = ob_buy['asks'][0]
-                bid_price, bid_amount = ob_sell['bids'][0]
-                if ask_price <= 0: continue
+                if not ob_buy.get("asks") or not ob_sell.get("bids"):
+                    continue
 
-                spread_rel = (bid_price - ask_price) / ask_price
-                if spread_rel < SPREAD_THRESHOLD: continue
+                ask, ask_amt = ob_buy["asks"][0]
+                bid, bid_amt = ob_sell["bids"][0]
+                if ask <= 0:
+                    continue
 
-                approx_vol = max( await orderbook_volume_usd(buy_client, symbol),
-                                 await orderbook_volume_usd(sell_client, symbol))
-                if approx_vol < MIN_VOLUME_USD: continue
+                spread = (bid - ask) / ask
+                if spread < SPREAD_THRESHOLD:
+                    continue
+
+                vol = max(
+                    await orderbook_volume_usd(ex_buy, symbol),
+                    await orderbook_volume_usd(ex_sell, symbol),
+                )
+                if vol < MIN_VOLUME_USD:
+                    continue
 
                 base = symbol.split("/")[0]
-                try:
-                    dep_buy, wdr_buy, note_buy = await check_deposit_withdraw(buy_client, base)
-                except Exception as e:
-                    dep_buy, wdr_buy, note_buy = True, True, "chk_err"
-                try:
-                    dep_sell, wdr_sell, note_sell = await check_deposit_withdraw(sell_client, base)
-                except Exception as e:
-                    dep_sell, wdr_sell, note_sell = True, True, "chk_err"
+
+                dep_buy, w_buy, note_buy = await check_deposit_withdraw(ex_buy, base)
+                dep_sell, w_sell, note_sell = await check_deposit_withdraw(ex_sell, base)
 
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                text = ( f"🔥 <b>Арбитраж</b> {symbol}\n"
-                         f"Купить: <b>{buy_ex}</b> → {ask_price:.8f}\n"
-                         f"Продать: <b>{sell_ex}</b> → {bid_price:.8f}\n"
-                         f"СПРЕД: <b>{spread_rel*100:.4f}%</b>\n"
-                         f"Объём (approx USD): {approx_vol:.2f}\n"
-                         f"Время: {now}\n\n"
-                         f"Вывод на {buy_ex} (withdraw {base}): {'✔' if wdr_buy else '✖'} {note_buy}\n"
-                         f"Ввод на {sell_ex} (deposit {base}): {'✔' if dep_sell else '✖'} {note_sell}" )
 
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подробнее", callback_data='details')]])
-                await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
+                text = (
+                    f"🔥 <b>Арбитраж</b> {symbol}\n"
+                    f"Купить: <b>{buy_ex}</b> → {ask:.8f}\n"
+                    f"Продать: <b>{sell_ex}</b> → {bid:.8f}\n"
+                    f"СПРЕД: <b>{spread * 100:.4f}%</b>\n"
+                    f"Объём (USD): {vol:.2f}\n"
+                    f"Время: {now}\n\n"
+                    f"Вывод {base} с {buy_ex}: {'✔' if w_buy else '✖'} {note_buy}\n"
+                    f"Ввод {base} на {sell_ex}: {'✔' if dep_sell else '✖'} {note_sell}"
+                )
+
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Подробнее", callback_data=f"details_{symbol}")]]
+                )
+
+                await app.bot.send_message(
+                    chat_id=TARGET_CHAT_ID,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+
 
 async def run_scanner(app):
     global scanner_running
-    if scanner_running: return
+    if scanner_running:
+        return
     scanner_running = True
+
     while True:
-        logger.info("Starting scanner iteration...")
         try:
             await scanner_once(app)
         except Exception as e:
-            logger.error(f"Scanner error: {e}", exc_info=True)
+            logger.exception("scanner_once error: %s", e)
         await asyncio.sleep(CHECK_INTERVAL)
 
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text=f"Вы нажали кнопку! Дополнительная информация...")
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("Дополнительная информация скоро будет доступна.")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Бот запущен.")
+    await update.message.reply_text("Бот запущен.")
+
 
 async def main():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler('start', start))
+
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
+
+    await initialize_exchanges()
+
+    scanner_task = asyncio.create_task(run_scanner(application))
+
     try:
-        await initialize_exchanges()
-        scanner_task = asyncio.create_task(run_scanner(application))
         await application.run_polling()
-        scanner_task.cancel()
-
-    except Exception as e:
-        logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True) # <- Исправил. Убрал повтор exc_info
     finally:
+        scanner_task.cancel()
         try:
-             await application.shutdown()
-        except Exception as e:
-             logger.error(f"Shutdown error: {e}")
+            await application.shutdown()
+        except:
+            pass
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     asyncio.run(main())
