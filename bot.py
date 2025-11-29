@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Ваш токен Telegram
-TELEGRAM_TOKEN = os.getenv("8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")
+TELEGRAM_TOKEN = os.getenv("8014312970:AAGf2vGFfr-H3sF-DhvV3sisd6Q3wSKCp-s")
 
 # Период проверки бирж (сек)
 CHECK_INTERVAL = 10
