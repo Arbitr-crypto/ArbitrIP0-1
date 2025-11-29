@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]==20.3
 ccxt==4.5.22
 pandas==2.3.3
+nest_asyncio
 
