@@ -4,33 +4,65 @@ import nest_asyncio
 
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Вставь сюда токен
+# ================== TELEGRAM TOKEN ==================
 TELEGRAM_TOKEN = "8014312970:AAGf2vGFfr-H3sF-DhvV3sisd6Q3wSKCp-s"
 
-# Настройка логирования
+# ================== LOGGING ==================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
 logger = logging.getLogger(__name__)
 
-# Применяем nest_asyncio для совместимости с asyncio
+# ================== NEST ASYNCIO ==================
 nest_asyncio.apply()
 
-# Пример команды /start
+# ================== CLIENTS ==================
+# Пример инициализации клиентов. Подставляй свои реальные классы и ключи API
+class KucoinClient:
+    def __init__(self):
+        logger.info("Kucoin client created")
+
+class BitrueClient:
+    def __init__(self):
+        logger.info("Bitrue client created")
+
+class BitmartClient:
+    def __init__(self):
+        logger.info("Bitmart client created")
+
+class GateioClient:
+    def __init__(self):
+        logger.info("Gateio client created")
+
+class PoloniexClient:
+    def __init__(self):
+        logger.info("Poloniex client created")
+
+# Инициализация клиентов
+kucoin_client = KucoinClient()
+bitrue_client = BitrueClient()
+bitmart_client = BitmartClient()
+gateio_client = GateioClient()
+poloniex_client = PoloniexClient()
+
+# ================== TELEGRAM COMMANDS ==================
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен и работает!")
 
+# ================== MAIN ==================
 async def main():
-    # Создаем приложение Telegram
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Добавляем обработчик команды /start
+    # Добавляем обработчики команд
     app.add_handler(CommandHandler("start", start))
 
-    # Запускаем бота
-    await app.run_polling()
+    # Инициализация и запуск polling
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# ================== RUN BOT ==================
+loop = asyncio.get_event_loop()
+loop.run_until_complete(main())
