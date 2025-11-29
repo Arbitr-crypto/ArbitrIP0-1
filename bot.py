@@ -191,7 +191,11 @@ async def scanner_once(app):
                          f"Ввод на {sell_ex} (deposit {base}): {'✔' if dep_sell else '✖'} {note_sell}" )
 
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подробнее", callback_data='details')]])
-                await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
+                # Отправка сообщения
+                try:
+                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
 
 async def run_scanner(app):
     global scanner_running
@@ -219,16 +223,19 @@ async def main():
     application.add_handler(CallbackQueryHandler(button_callback))
 
     try:
-        await initialize_exchanges() # Wait for exchanges to initialize
+        # Запускаем сканер в отдельной задаче
+        asyncio.create_task(initialize_exchanges())
         asyncio.create_task(run_scanner(application))
+
+        # Запускаем polling в основном цикле
         await application.run_polling()
 
     except Exception as e:
         logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True)
     finally:
+        # Корректно завершаем работу
         if 'application' in locals() and application.running:
-            await application.shutdown() # Await shutdown
-            logger.info("Бот остановлен.")
+            await application.shutdown()
 
 if __name__ == '__main__':
     try:
