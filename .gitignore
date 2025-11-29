@@ -1,53 +1,27 @@
-# =====================
 # Python
-# =====================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.Python
+env/
+venv/
+.venv/
+pip-wheel-metadata/
+*.egg-info/
+
+# SQLite DBs
+*.db
 *.sqlite3
 
-# =====================
-# Virtual Environment
-# =====================
-.venv/
-venv/
-env/
-
-# =====================
-# Environment files
-# =====================
-*.env
-config.env
-config.env.local
-secret.env
-.env.*
-
-# =====================
 # Logs
-# =====================
 *.log
-logs/
-log/
 
-# =====================
 # OS files
-# =====================
 .DS_Store
 Thumbs.db
 
-# =====================
-# Database
-# =====================
-arbi_signals.db
-
-# =====================
-# IDE files
-# =====================
+# IDEs
 .vscode/
 .idea/
 
-# =====================
-# Railway build artifacts
-# =====================
-railway/
