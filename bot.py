@@ -420,3 +420,15 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Terminated by user")
+if __name__ == "__main__":
+    from telegram.ext import ApplicationBuilder
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # регистрируй handlers ниже
+    # app.add_handler(...)
+
+    # если есть фоновые задачи:
+    # app.job_queue.run_repeating(background_loop, interval=5)
+
+    app.run_polling()
