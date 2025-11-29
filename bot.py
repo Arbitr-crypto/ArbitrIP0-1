@@ -12,8 +12,9 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, CallbackQueryHandl
 from dotenv import load_dotenv
 load_dotenv()
 
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)  # Default to 0, ensure it's set
+TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
 MAX_COINS = 150
 SPREAD_THRESHOLD = 0.015
@@ -189,7 +190,7 @@ async def scanner_once(app):
                          f"Вывод на {buy_ex} (withdraw {base}): {'✔' if wdr_buy else '✖'} {note_buy}\n"
                          f"Ввод на {sell_ex} (deposit {base}): {'✔' if dep_sell else '✖'} {note_sell}" )
 
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подробнее", callback_data='details')]]) # Пример кнопки
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подробнее", callback_data='details')]])
                 await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
 
 async def run_scanner(app):
@@ -201,13 +202,13 @@ async def run_scanner(app):
         try:
             await scanner_once(app)
         except Exception as e:
-            logger.error(f"Scanner error: {e}", exc_info=True)  # Логируем полную трассировку
+            logger.error(f"Scanner error: {e}", exc_info=True)
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # Обязательно вызвать, чтобы убрать "часики" на кнопке
-    await query.edit_message_text(text=f"Вы нажали кнопку!  Дополнительная информация...")
+    await query.answer()
+    await query.edit_message_text(text=f"Вы нажали кнопку! Дополнительная информация...")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Бот запущен.")
@@ -215,20 +216,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CallbackQueryHandler(button_callback))  # Обработчик нажатия на кнопку
+    application.add_handler(CallbackQueryHandler(button_callback))
 
     try:
-        await initialize_exchanges() # Инициализация бирж
-        asyncio.create_task(run_scanner(application)) # Запуск сканера в фоне
+        await initialize_exchanges() # Wait for exchanges to initialize
+        asyncio.create_task(run_scanner(application))
         await application.run_polling()
 
     except Exception as e:
-        logger.critical(f"Бот упал с ошибкой: {e}")
+        logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True)
     finally:
         if 'application' in locals() and application.running:
-            await application.shutdown() # Корректное завершение
+            await application.shutdown() # Await shutdown
             logger.info("Бот остановлен.")
 
 if __name__ == '__main__':
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "This event loop is already running" in str(e):
+            logging.error("Event loop is already running.  This can happen in some environments.")
+        else:
+            raise
