@@ -12,7 +12,6 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, CallbackQueryHandl
 from dotenv import load_dotenv
 load_dotenv()
 
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
 EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
@@ -191,11 +190,7 @@ async def scanner_once(app):
                          f"Ввод на {sell_ex} (deposit {base}): {'✔' if dep_sell else '✖'} {note_sell}" )
 
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подробнее", callback_data='details')]])
-                # Отправка сообщения
-                try:
-                    await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+                await app.bot.send_message(chat_id=TARGET_CHAT_ID, text=text, parse_mode='HTML', reply_markup=keyboard)
 
 async def run_scanner(app):
     global scanner_running
@@ -218,30 +213,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Бот запущен.")
 
 async def main():
+     # Create the application *before* running initialize_exchanges
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     try:
-        # Запускаем сканер в отдельной задаче
-        asyncio.create_task(initialize_exchanges())
-        asyncio.create_task(run_scanner(application))
-
-        # Запускаем polling в основном цикле
+        await initialize_exchanges() # Wait for exchanges to initialize
+        # Run run_scanner in a separate task
+        scanner_task = asyncio.create_task(run_scanner(application))
+        # Run the bot
         await application.run_polling()
-
+        # If the bot stops polling, cancel the scanner task
+        scanner_task.cancel()
     except Exception as e:
         logger.critical(f"Бот упал с ошибкой: {e}", exc_info=True)
     finally:
-        # Корректно завершаем работу
         if 'application' in locals() and application.running:
-            await application.shutdown()
+            await application.shutdown() # Await shutdown
+            logger.info("Бот остановлен.")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except RuntimeError as e:
         if "This event loop is already running" in str(e):
-            logging.error("Event loop is already running.  This can happen in some environments.")
+            logger.warning("Event loop already running, ignoring")
         else:
-            raise
+            raise e
