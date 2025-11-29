@@ -1,5 +1,7 @@
 # bot.py
 import os
+import nest_asyncio
+nest_asyncio.apply()
 import sqlite3
 from datetime import datetime, timezone
 import logging
