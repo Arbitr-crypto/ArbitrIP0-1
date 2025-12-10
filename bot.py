@@ -1,312 +1,144 @@
-import os
-import asyncio
-import logging
-import sqlite3
-import time
-from datetime import datetime, timezone
-from typing import Dict, Tuple
-import ccxt
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-from dotenv import load_dotenv
-
-load_dotenv()
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID") or 0)
-
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN не задан в .env")
-if TARGET_CHAT_ID == 0:
-    raise RuntimeError("TARGET_CHAT_ID не задан в .env")
-
-EXCHANGE_IDS = ["kucoin", "bitrue", "bitmart", "gateio", "poloniex"]
-MAX_COINS = 150
-SPREAD_THRESHOLD = 0.015
-MIN_VOLUME_USD = 1500.0
-CHECK_INTERVAL = 60
-SYMBOL_QUOTE = "/USDT"
-MARKETS_CACHE_TTL = 600
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("arbi-bot")
-
-DB_FILE = "arbi_signals.db"
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cur = conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT,
-    buy_ex TEXT,
-    sell_ex TEXT,
-    spread REAL,
-    created_at TEXT
-)
-""")
-conn.commit()
-
-
-def save_signal(symbol: str, buy_ex: str, sell_ex: str, spread: float):
-    cur.execute(
-        "INSERT INTO signals(symbol, buy_ex, sell_ex, spread, created_at) VALUES(?,?,?,?,?)",
-        (symbol, buy_ex, sell_ex, float(spread), datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-
-
-def last_signal(symbol: str, buy_ex: str, sell_ex: str):
-    cur.execute(
-        "SELECT spread, created_at FROM signals WHERE symbol=? AND buy_ex=? AND sell_ex=? ORDER BY id DESC LIMIT 1",
-        (symbol, buy_ex, sell_ex),
-    )
-    return cur.fetchone()
-
-
-exchanges: Dict[str, ccxt.Exchange] = {}
-
-
-async def initialize_exchanges():
-    for ex_id in EXCHANGE_IDS:
-        try:
-            cls = getattr(ccxt, ex_id)
-            exchanges[ex_id] = cls({"enableRateLimit": True})
-            logger.info("Exchange %s initialized", ex_id)
-        except Exception as e:
-            logger.error("Exchange init %s failed: %s", ex_id, e)
-
-
-def is_valid_symbol(sym: str) -> bool:
-    if not sym.endswith(SYMBOL_QUOTE):
-        return False
-    bad = ["3S", "3L", "UP", "DOWN", "BULL", "BEAR", "ETF", "INVERSE"]
-    u = sym.upper()
-    if any(b in u for b in bad):
-        return False
-    base = sym.split("/")[0]
-    return 2 <= len(base) <= 20
-
-
-async def safe_fetch_order_book(exchange, symbol: str, limit=5):
+Обработчик callback для кнопки "Проверить спред"
+    Показывает актуальный спред и сравнивает с предыдущим сигналом
+    """
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data  # format: check|SYMBOL|BUY_EX|SELL_EX
     try:
-        return await asyncio.to_thread(exchange.fetch_order_book, symbol, limit)
+        _, symbol, buy_ex, sell_ex = data.split("|")
     except Exception:
-        return None
-
-
-def orderbook_volume_usd_sync(exchange: ccxt.Exchange, symbol: str) -> float:
-    try:
-        ob = exchange.fetch_order_book(symbol, limit=5)
-        bids = ob.get("bids") or []
-        asks = ob.get("asks") or []
-        bid_vol = sum([p * a for p, a in bids[:3]])
-        ask_vol = sum([p * a for p, a in asks[:3]])
-        return max(bid_vol, ask_vol)
-    except Exception:
-        return 0.0
-
-
-async def orderbook_volume_usd(exchange, symbol):
-    return await asyncio.to_thread(orderbook_volume_usd_sync, exchange, symbol)
-
-
-async def check_deposit_withdraw(exchange, currency: str) -> Tuple[bool, bool, str]:
-    deposit_ok, withdraw_ok = True, True
-    note = ""
-
-    try:
-        has = getattr(exchange, "has", {}) or {}
-        if has.get("deposit") is False:
-            deposit_ok = False
-        if has.get("withdraw") is False:
-            withdraw_ok = False
-    except Exception:
-        pass
-
-    try:
-        if hasattr(exchange, "fetch_currencies"):
-            currencies = await asyncio.to_thread(exchange.fetch_currencies)
-            if isinstance(currencies, dict):
-                info = (
-                    currencies.get(currency)
-                    or currencies.get(currency.upper())
-                    or currencies.get(currency.lower())
-                )
-                if isinstance(info, dict):
-                    if "deposit" in info:
-                        deposit_ok = bool(info["deposit"])
-                    if "withdraw" in info:
-                        withdraw_ok = bool(info["withdraw"])
-                    if info.get("active") is False:
-                        deposit_ok = False
-                        withdraw_ok = False
-    except Exception:
-        pass
-
-    if not deposit_ok:
-        note += "deposit_disabled "
-    if not withdraw_ok:
-        note += "withdraw_disabled"
-
-    return deposit_ok, withdraw_ok, note.strip()
-
-
-_markets_cache = {}
-_markets_cache_time = 0
-
-
-async def load_markets_cached():
-    global _markets_cache, _markets_cache_time
-
-    now = time.time()
-    if now - _markets_cache_time < MARKETS_CACHE_TTL and _markets_cache:
-        return _markets_cache
-
-    result = {}
-    for name, ex in exchanges.items():
-        try:
-            markets = await asyncio.to_thread(ex.load_markets)
-            valid = [s for s in markets.keys() if is_valid_symbol(s)]
-            result[name] = set(valid)
-        except Exception as e:
-            logger.error("load_markets %s failed: %s", name, e)
-            result[name] = set()
-
-    _markets_cache = result
-    _markets_cache_time = now
-    return result
-
-
-scanner_running = False
-
-
-async def scanner_once(app):
-    markets = await load_markets_cached()
-
-    symbol_map = {}
-    for ex, pairs in markets.items():
-        for s in pairs:
-            symbol_map.setdefault(s, []).append(ex)
-
-    common = [s for s, lst in symbol_map.items() if len(lst) >= 2]
-    common = sorted(common)[:MAX_COINS]
-
-    logger.info("Checking %d symbols...", len(common))
-
-    for symbol in common:
-        ex_list = symbol_map[symbol]
-
-        for buy_ex in ex_list:
-            for sell_ex in ex_list:
-                if buy_ex == sell_ex:
-                    continue
-
-                ex_buy = exchanges[buy_ex]
-                ex_sell = exchanges[sell_ex]
-
-                ob_buy = await safe_fetch_order_book(ex_buy, symbol)
-                ob_sell = await safe_fetch_order_book(ex_sell, symbol)
-                if not ob_buy or not ob_sell:
-                    continue
-
-                if not ob_buy.get("asks") or not ob_sell.get("bids"):
-                    continue
-
-                ask, ask_amt = ob_buy["asks"][0]
-                bid, bid_amt = ob_sell["bids"][0]
-                if ask <= 0:
-                    continue
-
-                spread = (bid - ask) / ask
-                if spread < SPREAD_THRESHOLD:
-                    continue
-
-                vol = max(
-                    await orderbook_volume_usd(ex_buy, symbol),
-                    await orderbook_volume_usd(ex_sell, symbol),
-                )
-                if vol < MIN_VOLUME_USD:
-                    continue
-
-                base = symbol.split("/")[0]
-
-                dep_buy, w_buy, note_buy = await check_deposit_withdraw(ex_buy, base)
-                dep_sell, w_sell, note_sell = await check_deposit_withdraw(ex_sell, base)
-
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                text = (
-                    f"🔥 <b>Арбитраж</b> {symbol}\n"
-                    f"Купить: <b>{buy_ex}</b> → {ask:.8f}\n"
-                    f"Продать: <b>{sell_ex}</b> → {bid:.8f}\n"
-                    f"СПРЕД: <b>{spread * 100:.4f}%</b>\n"
-                    f"Объём (USD): {vol:.2f}\n"
-                    f"Время: {now}\n\n"
-                    f"Вывод {base} с {buy_ex}: {'✔' if w_buy else '✖'} {note_buy}\n"
-                    f"Ввод {base} на {sell_ex}: {'✔' if dep_sell else '✖'} {note_sell}"
-                )
-
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Подробнее", callback_data=f"details_{symbol}")]]
-                )
-
-                await app.bot.send_message(
-                    chat_id=TARGET_CHAT_ID,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
-
-
-async def run_scanner(app):
-    global scanner_running
-    if scanner_running:
+        await query.message.reply_text("Неверные данные для проверки.")
         return
-    scanner_running = True
 
+    buy_client = exchanges.get(buy_ex)
+    sell_client = exchanges.get(sell_ex)
+    if not buy_client or not sell_client:
+        await query.message.reply_text("Клиент биржи недоступен.")
+        return
+
+    try:
+        ob_buy = buy_client.fetch_order_book(symbol, limit=5)
+        ob_sell = sell_client.fetch_order_book(symbol, limit=5)
+    except Exception as e:
+        await query.message.reply_text(f"Ошибка получения стаканов: {e}")
+        return
+
+    ask_price = ob_buy['asks'][0][0] if ob_buy.get('asks') else None
+    bid_price = ob_sell['bids'][0][0] if ob_sell.get('bids') else None
+    
+    if ask_price is None or bid_price is None:
+        await query.message.reply_text("Не удалось получить лучшие цены.")
+        return
+
+    current_spread = (bid_price - ask_price) / ask_price
+    last = last_signal(symbol, buy_ex, sell_ex)
+    
+    if last:
+        prev_spread, prev_time = last
+        diff = (current_spread - prev_spread)
+        cmp_text = (
+            f"Текущий спред: {current_spread*100:.4f}%\n"
+            f"Ранее: {prev_spread*100:.4f}% ({prev_time})\n"
+            f"Изменение: {diff*100:+.4f}%"
+        )
+    else:
+        cmp_text = f"Текущий спред: {current_spread*100:.4f}%\n(нет предыдущего сигнала)"
+    
+    v_buy = orderbook_volume_usd(buy_client, symbol)
+    v_sell = orderbook_volume_usd(sell_client, symbol)
+    
+    text = (
+        f"🔄 Актуальный спред для {symbol}\n"
+        f"Купить: {buy_ex} → {ask_price:.8f}\n"
+        f"Продать: {sell_ex} → {bid_price:.8f}\n"
+        + cmp_text +
+        f"\nОбъёмы (approx USD): buy={v_buy:.2f}, sell={v_sell:.2f}"
+    )
+    
+    await query.message.reply_text(text)
+
+
+# ---------- Команда /scan (вручную запустить одну итерацию) ----------
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для ручного запуска сканирования"""
+    await update.message.reply_text("Запускаю одну итерацию сканера (это может занять время)...")
+    try:
+        await scanner_once(context.application)
+        await update.message.reply_text("Готово.")
+    except Exception as e:
+        logger.exception("Ошибка при выполнении команды /scan")
+        await update.message.reply_text(f"Ошибка при сканировании: {e}")
+
+
+# ---------- Фоновый цикл (бесконечное сканирование) ----------
+async def background_loop(app):
+    """Фоновая задача для периодического сканирования"""
     while True:
         try:
+            logger.info("Background scan start")
             await scanner_once(app)
+            logger.info("Background scan finished")
         except Exception as e:
-            logger.exception("scanner_once error: %s", e)
+            logger.exception(f"Error in background scan: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.edit_message_text("Дополнительная информация скоро будет доступна.")
+# ---------- /start команда ----------
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start - приветствие"""
+    await update.message.reply_text(
+        "🤖 Арбитражный бот запущен!\n\n"
+        "Команды:\n"
+        "/start - показать это сообщение\n"
+        "/scan - запустить сканирование вручную\n\n"
+        "Бот автоматически сканирует биржи каждые 60 секунд."
+    )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен.")
+# ---------- /status команда ----------
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки статуса бота"""
+    active_exchanges = len([ex for ex in exchanges.values() if ex is not None])
+    status_text = (
+        f"📊 Статус бота:\n\n"
+        f"Активных бирж: {active_exchanges}/{len(EXCHANGE_IDS)}\n"
+        f"Интервал сканирования: {CHECK_INTERVAL} сек\n"
+        f"Минимальный спред: {SPREAD_THRESHOLD*100:.2f}%\n"
+        f"Минимальный объем: ${MIN_VOLUME_USD}\n"
+        f"Максимум монет: {MAX_COINS}"
+    )
+    await update.message.reply_text(status_text)
 
 
+# ---------- main ----------
 async def main():
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    """Главная функция запуска бота"""
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN.strip() == "":
+        logger.error("TELEGRAM_TOKEN не установлен! Установите переменную окружения TELEGRAM_TOKEN")
+        return
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
+    logger.info("Инициализация бота...")
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Регистрируем обработчики команд
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CallbackQueryHandler(check_callback, pattern=r"^check\|"))
 
-    await initialize_exchanges()
+    # Запускаем фоновую задачу
+    asyncio.create_task(background_loop(app))
 
-    scanner_task = asyncio.create_task(run_scanner(application))
-
-    try:
-        await application.run_polling()
-    finally:
-        scanner_task.cancel()
-        try:
-            await application.shutdown()
-        except:
-            pass
+    logger.info("Bot running...")
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.exception(f"Fatal error: {e}")
+
