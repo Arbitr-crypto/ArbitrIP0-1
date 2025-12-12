@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: arbitrage-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: ваш_токен_бота_8363276228...
+      - key: ADMIN_IDS
+        value: ваш_chat_id_8193755967
