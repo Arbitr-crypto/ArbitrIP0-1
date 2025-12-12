@@ -60,7 +60,7 @@ exchanges = {
 
 # Логируем успешную инициализацию бирж
 for name, exchange in exchanges.items():
-    logger.info(f'✓ {name} client created')
+    logger.info(f'✓ {name} клиент создан')
 
 # Глобальные переменные
 active_users = set()
@@ -75,7 +75,7 @@ def get_all_symbols():
             markets = exchange.load_markets()
             symbols.update(markets.keys())
         except Exception as e:
-            logger.error(f"Error loading markets from {exchange.name}: {e}")
+            logger.error(f"Ошибка загрузки рынков с {exchange.name}: {e}")
     return list(symbols)
 
 async def fetch_ticker(exchange_name, symbol):
@@ -91,7 +91,7 @@ async def fetch_ticker(exchange_name, symbol):
             'exchange': exchange_name
         }
     except Exception as e:
-        logger.debug(f"Error fetching {symbol} from {exchange_name}: {e}")
+        logger.debug(f"Ошибка получения {symbol} с {exchange_name}: {e}")
         return None
 
 async def check_arbitrage_for_pair(symbol):
@@ -357,6 +357,7 @@ if __name__ == '__main__':
     # Используем asyncio.run только если мы в главном потоке
     try:
         # Проверяем, есть ли уже запущенный event loop
+        import asyncio
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # Если loop уже запущен, просто запускаем main
