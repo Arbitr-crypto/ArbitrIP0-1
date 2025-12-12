@@ -20,8 +20,10 @@ logger = logging.getLogger('arbi-bot')
 load_dotenv()
 
 # Конфигурация
-# Временная жесткая вставка токена для теста (НЕ КОММИТЬ В ТАКОМ ВИДЕ!)
-BOT_TOKEN = "8363276228:AAGtK9iWOugMCgqwRpbzHf43eyXBdwqputM"
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    logger.error("Токен не найден!")
+    sys.exit(1)
 # BOT_TOKEN = os.getenv('BOT_TOKEN')  # <-- Эту старую строку можно закомментировать
 ADMIN_IDS = ['8193755967']  # Укажите ID в списке
 # ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
