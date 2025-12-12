@@ -2,6 +2,7 @@ import asyncio
 import ccxt
 import logging
 import os
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
@@ -325,7 +326,10 @@ def main():
     
     if not BOT_TOKEN:
         logger.error("Токен бота не найден! Убедитесь, что BOT_TOKEN установлен в переменных окружения.")
-        return
+        # В Railway нужно установить переменную окружения
+        print("Установите переменную окружения BOT_TOKEN на Railway!")
+        print("Перейдите в Settings -> Variables и добавьте BOT_TOKEN")
+        sys.exit(1)
     
     try:
         # Создаем приложение
@@ -346,7 +350,7 @@ def main():
         
         logger.info("Бот запущен и ожидает команды...")
         
-        # Запускаем бота
+        # Запускаем бота (это блокирующий вызов)
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
@@ -354,19 +358,5 @@ def main():
         raise
 
 if __name__ == '__main__':
-    # Используем asyncio.run только если мы в главном потоке
-    try:
-        # Проверяем, есть ли уже запущенный event loop
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Если loop уже запущен, просто запускаем main
-            main()
-        else:
-            # Если нет, используем asyncio.run
-            asyncio.run(main())
-    except RuntimeError as e:
-        if "no running event loop" in str(e):
-            main()
-        else:
-            raise
+    # Простой запуск без asyncio.run()
+    main()
