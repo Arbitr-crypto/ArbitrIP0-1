@@ -363,16 +363,15 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- Фоновый цикл (бесконечное сканирование) ----------
-async def background_loop(app):
-    """Фоновая задача для периодического сканирования"""
-    while True:
-        try:
-            logger.info("Background scan start")
-            await scanner_once(app)
-            logger.info("Background scan finished")
-        except Exception as e:
-            logger.exception(f"Error in background scan: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
+async def background_job(context: ContextTypes.DEFAULT_TYPE):
+    """Задача для JobQueue: периодический запуск сканера"""
+    app = context.application
+    try:
+        logger.info("JobQueue scan start")
+        await scanner_once(app)
+        logger.info("JobQueue scan finished")
+    except Exception as e:
+        logger.exception(f"Error in JobQueue scan: {e}")
 
 
 # ---------- /start команда ----------
@@ -418,8 +417,13 @@ async def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(check_callback, pattern=r"^check\|"))
 
-    # Запускаем фоновую задачу
-    asyncio.create_task(background_loop(app))
+    # Запускаем периодический сканер через JobQueue (без ручного управления event loop)
+    app.job_queue.run_repeating(
+        background_job,
+        interval=CHECK_INTERVAL,
+        first=5,
+        name="background_scanner",
+    )
 
     logger.info("Bot running...")
     await app.run_polling()
