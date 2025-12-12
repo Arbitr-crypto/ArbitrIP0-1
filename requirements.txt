@@ -1,4 +1,3 @@
 python-telegram-bot[job-queue]==13.15
 ccxt==4.2.85
 python-dotenv==1.0.0
-aiohttp==3.9.1
