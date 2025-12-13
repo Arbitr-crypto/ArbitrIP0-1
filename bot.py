@@ -25,7 +25,7 @@ if not BOT_TOKEN:
     logger.error("Токен не найден!")
     sys.exit(1)
 # BOT_TOKEN = os.getenv('BOT_TOKEN')  # <-- Эту старую строку можно закомментировать
-ADMIN_IDS = ['8193755967']  # Укажите ID в списке
+ADMIN_IDS = ['6590452577']  # Укажите ID в списке
 # ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
 # Инициализация бирж
 exchanges = {
