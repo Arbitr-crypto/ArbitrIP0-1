@@ -244,6 +244,7 @@ def format_opportunities_message(opportunities):
             f"   💰 Прибыль: ${opp['profit']:.8f} (<b>{opp['profit_percentage']:.2f}%</b>)\n"
             f"   📊 Объем (24ч): Купить: ${opp['buy_volume']:.2f}, Продать: ${opp['sell_volume']:.2f}\n"
             f"   ⏰ Время: {datetime.fromisoformat(opp['timestamp']).strftime('%H:%M:%S')}\n\n"
+            f"   💬 <b>Поддержка/Предложения по боту:</b> @ArbitrIP"  # ← ЗАМЕНИТЕ @МойUserName на ваш реальный юзернейм
         )
     
     return message
