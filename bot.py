@@ -144,7 +144,7 @@ async def check_arbitrage_for_pair(symbol):
     
     profit_percentage = (spread / best_ask['ask']) * 100
     
-    if profit_percentage < 0.5:  # Минимальный порог прибыли 0.5%
+    if profit_percentage < 2.0:  # Минимальный порог прибыли 2.0%
         return None
     
     return {
@@ -157,7 +157,33 @@ async def check_arbitrage_for_pair(symbol):
         'profit_percentage': profit_percentage,
         'timestamp': datetime.now().isoformat()
     }
+# ========== НАЧАЛО БЛОКА ФИЛЬТРАЦИИ ==========
+# ФИЛЬТР 1: Только пары с USDT (отсекает BTC, ETH и т.д.)
+if not symbol.endswith('/USDT'):
+    continue  # Пропускаем эту пару, переходим к следующей
 
+# ФИЛЬТР 2: Исключаем левереджные токены (3S, 3L, 5S и т.д.)
+leveraged_keywords = ['3S', '3L', '5S', '5L', '10S', '10L', 'BEAR', 'BULL', 'UP', 'DOWN']
+if any(keyword in symbol for keyword in leveraged_keywords):
+    continue
+
+# ФИЛЬТР 3: Минимальный объем торгов (ликвидность)
+# Предположим, переменная `volume` содержит объем торгов в USDT за последние 24 часа
+min_volume = 10000  # Минимальный объем = 10 000 USDT. Настройте под себя.
+if volume < min_volume:
+    continue
+
+# ФИЛЬТР 4: Минимальная и максимальная цена (отсекает микро-стоимости и ошибки)
+min_price = 0.0005
+max_price = 005000
+if buy_price < min_price or sell_price < min_price or buy_price > max_price or sell_price > max_price:
+    continue
+
+# ФИЛЬТР 5: Максимальный реалистичный спред (например, 20%)
+MAX_REASONABLE_PROFIT = 20.0  # Процентов
+if profit_percentage > MAX_REASONABLE_PROFIT:
+    continue
+# ========== КОНЕЦ БЛОКА ФИЛЬТРАЦИИ ==========
 async def check_arbitrage_opportunities(context: ContextTypes.DEFAULT_TYPE):
     """Проверка арбитражных возможностей по всем парам"""
     logger.info("Начинаю сканирование арбитражных возможностей...")
