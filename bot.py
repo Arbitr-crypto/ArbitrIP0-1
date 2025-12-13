@@ -175,7 +175,7 @@ if volume < min_volume:
 
 # ФИЛЬТР 4: Минимальная и максимальная цена (отсекает микро-стоимости и ошибки)
 min_price = 0.0005
-max_price = 005000
+max_price = 500000
 if buy_price < min_price or sell_price < min_price or buy_price > max_price or sell_price > max_price:
     continue
 
