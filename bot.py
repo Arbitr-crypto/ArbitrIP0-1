@@ -25,7 +25,23 @@ if not BOT_TOKEN:
     logger.error("Токен не найден!")
     sys.exit(1)
 # BOT_TOKEN = os.getenv('BOT_TOKEN')  # <-- Эту старую строку можно закомментировать
-ADMIN_IDS = ['6590452577']  # Укажите ID в списке
+# Правильное получение токена и ID администратора из переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    logger.error("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения 'BOT_TOKEN' не найдена.")
+    sys.exit(1)
+
+# Получаем строку с ID администраторов из переменной окружения
+admin_ids_str = os.getenv('ADMIN_IDS', '').strip()
+if admin_ids_str:
+    # Преобразуем строку "6590452577, 123456" в список чисел [6590452577, 123456]
+    ADMIN_IDS = [int(id_str.strip()) for id_str in admin_ids_str.split(',')]
+else:
+    # Если переменная пуста, создаём пустой список (доступ будет закрыт)
+    ADMIN_IDS = []
+    logger.warning("Переменная 'ADMIN_IDS' не задана. Доступ к боту будет закрыт.")
+
+logger.info(f"Токен получен. ID администраторов: {ADMIN_IDS}")
 # ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
 # Инициализация бирж
 exchanges = {
