@@ -22,27 +22,19 @@ load_dotenv()
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
-    logger.error("Токен не найден!")
-    sys.exit(1)
-# BOT_TOKEN = os.getenv('BOT_TOKEN')  # <-- Эту старую строку можно закомментировать
-# Правильное получение токена и ID администратора из переменных окружения
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN:
     logger.error("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения 'BOT_TOKEN' не найдена.")
     sys.exit(1)
 
-# Получаем строку с ID администраторов из переменной окружения
+# Получаем строку с ID администраторов
 admin_ids_str = os.getenv('ADMIN_IDS', '').strip()
 if admin_ids_str:
-    # Преобразуем строку "6590452577, 123456" в список чисел [6590452577, 123456]
     ADMIN_IDS = [int(id_str.strip()) for id_str in admin_ids_str.split(',')]
 else:
-    # Если переменная пуста, создаём пустой список (доступ будет закрыт)
     ADMIN_IDS = []
     logger.warning("Переменная 'ADMIN_IDS' не задана. Доступ к боту будет закрыт.")
 
 logger.info(f"Токен получен. ID администраторов: {ADMIN_IDS}")
-# ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
+
 # Инициализация бирж
 exchanges = {
     'kucoin': ccxt.kucoin({
@@ -100,7 +92,7 @@ def get_all_symbols():
     return list(symbols)
 
 async def fetch_ticker(exchange_name, symbol):
-    """Асинхронное получение тикера"""
+    """Асинхронное получение тикера с объемом"""
     exchange = exchanges[exchange_name]
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -109,6 +101,7 @@ async def fetch_ticker(exchange_name, symbol):
             'bid': ticker['bid'] if ticker['bid'] else 0,
             'ask': ticker['ask'] if ticker['ask'] else 0,
             'last': ticker['last'] if ticker['last'] else 0,
+            'quoteVolume': ticker['quoteVolume'] if ticker.get('quoteVolume') else 0,
             'exchange': exchange_name
         }
     except Exception as e:
@@ -117,6 +110,18 @@ async def fetch_ticker(exchange_name, symbol):
 
 async def check_arbitrage_for_pair(symbol):
     """Проверка арбитражных возможностей для конкретной пары"""
+    
+    # ----- ФИЛЬТР ПО НАЗВАНИЮ ПАРЫ -----
+    # ФИЛЬТР 1: Только пары с USDT
+    if not symbol.endswith('/USDT'):
+        return None  # Пропускаем пары типа BTC/ETH
+
+    # ФИЛЬТР 2: Исключаем левереджные токены (3S, 3L и т.д.)
+    leveraged_keywords = ['3S', '3L', '5S', '5L', '10S', '10L', 'BEAR', 'BULL', 'UP', 'DOWN']
+    if any(keyword in symbol.upper() for keyword in leveraged_keywords):
+        return None
+    # ------------------------------------
+    
     tasks = []
     for exchange_name in exchanges.keys():
         tasks.append(fetch_ticker(exchange_name, symbol))
@@ -138,52 +143,49 @@ async def check_arbitrage_for_pair(symbol):
     if best_bid['exchange'] == best_ask['exchange']:
         return None
     
+    # ----- ФИЛЬТР ПО ОБЪЕМУ -----
+    min_volume = 10000  # Минимальный объем = 10 000 USDT
+    if best_bid['quoteVolume'] < min_volume or best_ask['quoteVolume'] < min_volume:
+        return None
+    # ---------------------------
+    
     spread = best_bid['bid'] - best_ask['ask']
     if spread <= 0:
         return None
     
     profit_percentage = (spread / best_ask['ask']) * 100
     
-    if profit_percentage < 2.0:  # Минимальный порог прибыли 2.0%
+    # ----- ФИЛЬТР ПО ЦЕНЕ И ПРИБЫЛИ -----
+    min_price = 0.0005
+    max_price = 500000
+    buy_price = best_ask['ask']
+    sell_price = best_bid['bid']
+    if buy_price < min_price or sell_price < min_price or buy_price > max_price or sell_price > max_price:
+        return None
+
+    MAX_REASONABLE_PROFIT = 15.0  # Максимальный реалистичный спред (%)
+    if profit_percentage > MAX_REASONABLE_PROFIT:
+        return None
+    # ------------------------------------
+    
+    # МИНИМАЛЬНЫЙ СПРЕД ДЛЯ ПОИСКА - 2.0%
+    MIN_PROFIT_PERCENTAGE = 2.0  # ← ЭТО ВАШЕ УСЛОВИЕ
+    if profit_percentage < MIN_PROFIT_PERCENTAGE:
         return None
     
     return {
         'symbol': symbol,
         'buy_exchange': best_ask['exchange'],
         'buy_price': best_ask['ask'],
+        'buy_volume': best_ask['quoteVolume'],
         'sell_exchange': best_bid['exchange'],
         'sell_price': best_bid['bid'],
+        'sell_volume': best_bid['quoteVolume'],
         'profit': spread,
         'profit_percentage': profit_percentage,
         'timestamp': datetime.now().isoformat()
     }
-# ========== НАЧАЛО БЛОКА ФИЛЬТРАЦИИ ==========
-# ФИЛЬТР 1: Только пары с USDT (отсекает BTC, ETH и т.д.)
-if not symbol.endswith('/USDT'):
-    continue  # Пропускаем эту пару, переходим к следующей
 
-# ФИЛЬТР 2: Исключаем левереджные токены (3S, 3L, 5S и т.д.)
-leveraged_keywords = ['3S', '3L', '5S', '5L', '10S', '10L', 'BEAR', 'BULL', 'UP', 'DOWN']
-if any(keyword in symbol for keyword in leveraged_keywords):
-    continue
-
-# ФИЛЬТР 3: Минимальный объем торгов (ликвидность)
-# Предположим, переменная `volume` содержит объем торгов в USDT за последние 24 часа
-min_volume = 10000  # Минимальный объем = 10 000 USDT. Настройте под себя.
-if volume < min_volume:
-    continue
-
-# ФИЛЬТР 4: Минимальная и максимальная цена (отсекает микро-стоимости и ошибки)
-min_price = 0.0005
-max_price = 500000
-if buy_price < min_price or sell_price < min_price or buy_price > max_price or sell_price > max_price:
-    continue
-
-# ФИЛЬТР 5: Максимальный реалистичный спред (например, 20%)
-MAX_REASONABLE_PROFIT = 20.0  # Процентов
-if profit_percentage > MAX_REASONABLE_PROFIT:
-    continue
-# ========== КОНЕЦ БЛОКА ФИЛЬТРАЦИИ ==========
 async def check_arbitrage_opportunities(context: ContextTypes.DEFAULT_TYPE):
     """Проверка арбитражных возможностей по всем парам"""
     logger.info("Начинаю сканирование арбитражных возможностей...")
@@ -228,7 +230,7 @@ async def check_arbitrage_opportunities(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Сканирование завершено. Найдено возможностей: {len(opportunities)}")
 
 def format_opportunities_message(opportunities):
-    """Форматирование сообщения с арбитражными возможностями"""
+    """Форматирование сообщения с арбитражными возможностями (с объемом)"""
     if not opportunities:
         return "На данный момент арбитражных возможностей не найдено."
     
@@ -240,6 +242,7 @@ def format_opportunities_message(opportunities):
             f"   📥 Купить на: {opp['buy_exchange'].upper()} - ${opp['buy_price']:.8f}\n"
             f"   📤 Продать на: {opp['sell_exchange'].upper()} - ${opp['sell_price']:.8f}\n"
             f"   💰 Прибыль: ${opp['profit']:.8f} (<b>{opp['profit_percentage']:.2f}%</b>)\n"
+            f"   📊 Объем (24ч): Купить: ${opp['buy_volume']:.2f}, Продать: ${opp['sell_volume']:.2f}\n"
             f"   ⏰ Время: {datetime.fromisoformat(opp['timestamp']).strftime('%H:%M:%S')}\n\n"
         )
     
@@ -343,7 +346,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Как это работает:</b>\n"
         "Бот автоматически сканирует цены на различных криптобиржах "
         "и находит разницы в ценах (арбитраж). При обнаружении прибыльной "
-        "возможности (более 0.5%) отправляется уведомление.\n\n"
+        "возможности (более 2.0%) отправляется уведомление.\n\n"
         "<b>Отслеживаемые биржи:</b>\n"
         "• KuCoin\n• Bitrue\n• Bitmart\n• Gate.io\n• Poloniex\n\n"
         "⏰ Автоматическое сканирование происходит каждые 60 секунд."
@@ -372,7 +375,6 @@ def main():
     
     if not BOT_TOKEN:
         logger.error("Токен бота не найден! Убедитесь, что BOT_TOKEN установлен в переменных окружения.")
-        # В Railway нужно установить переменную окружения
         print("Установите переменную окружения BOT_TOKEN на Railway!")
         print("Перейдите в Settings -> Variables и добавьте BOT_TOKEN")
         sys.exit(1)
@@ -396,7 +398,7 @@ def main():
         
         logger.info("Бот запущен и ожидает команды...")
         
-        # Запускаем бота (это блокирующий вызов)
+        # Запускаем бота
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
@@ -404,5 +406,4 @@ def main():
         raise
 
 if __name__ == '__main__':
-    # Простой запуск без asyncio.run()
     main()
