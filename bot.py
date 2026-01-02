@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
 import aiohttp
-# Добавьте эти две строки к остальным импортам в самом верху
 from flask import Flask
 import threading
 from typing import Dict, List, Optional
@@ -20,11 +19,23 @@ SCAN_LIMIT = 100                # Сканировать 100 USDT пар
 SCAN_INTERVAL = 60              # Интервал 60 секунд
 MAX_CONCURRENT_REQUESTS = 20    # Максимум одновременных запросов к биржам
 # ==================================================
-# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ НЕ УБИВАЛ ПРОЦЕСС) ==========
+
+# ==================== ОСНОВНОЙ КОД ====================
+
+# 1. Сначала настраиваем логирование
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger('arbi-bot')
+
+# 2. Создаем веб-сервер Flask (logger уже определен)
 web_app = Flask(__name__)
+
 @web_app.route('/')
 def home():
     return "✅ Arbitr Bot is running"
+
 @web_app.route('/health')
 def health():
     return "OK", 200
@@ -39,16 +50,8 @@ if __name__ != '__main__':
     server_thread = threading.Thread(target=run_web_server, daemon=True)
     server_thread.start()
     logger.info(f"🌐 Фоновый веб-сервер запущен для порта {os.getenv('PORT', 10000)}")
-# ====================================================================
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger('arbi-bot')
-
-# Загрузка переменных окружения
+# 3. Загрузка переменных окружения
 load_dotenv()
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -186,6 +189,14 @@ async def check_arbitrage_for_pair(symbol: str, fetcher: AsyncExchangeFetcher) -
     
     # Получаем данные со всех бирж
     tickers = await fetcher.fetch_ticker_batch(symbol)
+    
+    # ВРЕМЕННОЕ ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ (можно убрать позже)
+    if tickers:
+        logger.info(f"[DEBUG] {symbol}: получил данные с {len(tickers)} бирж.")
+        # Раскомментируйте следующую строку, чтобы видеть детали по каждой бирже
+        # for t in tickers:
+        #     logger.info(f"       {t['exchange']}: bid={t['bid']:.8f}, ask={t['ask']:.8f}, vol={t['quoteVolume']:.0f}")
+    
     if len(tickers) < 2:
         return None
     
