@@ -6,8 +6,7 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
-from concurrent.futures import ThreadPoolExecutor
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,80 +18,68 @@ logger = logging.getLogger('arbi-bot')
 # Загрузка переменных окружения
 load_dotenv()
 
-# Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
-    logger.error("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения 'BOT_TOKEN' не найдена.")
+    logger.error("КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден.")
     sys.exit(1)
 
-# Получаем строку с ID администраторов
 admin_ids_str = os.getenv('ADMIN_IDS', '').strip()
 if admin_ids_str:
     ADMIN_IDS = [int(id_str.strip()) for id_str in admin_ids_str.split(',')]
 else:
     ADMIN_IDS = []
-    logger.warning("Переменная 'ADMIN_IDS' не задана. Доступ к боту будет закрыт.")
+    logger.warning("ADMIN_IDS не задан. Доступ открыт для всех.")
 
 logger.info(f"Токен получен. ID администраторов: {ADMIN_IDS}")
 
-# Инициализация бирж
+# Инициализация ТОЛЬКО рабочих бирж (BitMart убран)
 exchanges = {
     'kucoin': ccxt.kucoin({
-        'apiKey': os.getenv('KUCOIN_API_KEY'),
-        'secret': os.getenv('KUCOIN_SECRET'),
-        'password': os.getenv('KUCOIN_PASSWORD'),
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
     'bitrue': ccxt.bitrue({
-        'apiKey': os.getenv('BITRUE_API_KEY'),
-        'secret': os.getenv('BITRUE_SECRET'),
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
-    }),
-    'bitmart': ccxt.bitmart({
-        'apiKey': os.getenv('BITMART_API_KEY'),
-        'secret': os.getenv('BITMART_SECRET'),
-        'uid': os.getenv('BITMART_UID'),
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
     'gateio': ccxt.gateio({
-        'apiKey': os.getenv('GATEIO_API_KEY'),
-        'secret': os.getenv('GATEIO_SECRET'),
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
     'poloniex': ccxt.poloniex({
-        'apiKey': os.getenv('POLONIEX_API_KEY'),
-        'secret': os.getenv('POLONIEX_SECRET'),
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     }),
 }
 
-# Логируем успешную инициализацию бирж
-for name, exchange in exchanges.items():
+for name in exchanges.keys():
     logger.info(f'✓ {name} клиент создан')
 
 # Глобальные переменные
 active_users = set()
 arbitrage_cache = {}
-executor = ThreadPoolExecutor(max_workers=10)
 
-def get_all_symbols():
-    """Получение всех доступных торговых пар с бирж"""
+# НАСТРОЙКИ ФИЛЬТРОВ (меняйте здесь!)
+MIN_PROFIT_PERCENT = 1.0  # ↓ Уменьшил с 2.0% до 1.0%
+MIN_VOLUME_USDT = 1000    # ↓ Уменьшил с 10000 до 1000 USDT
+SCAN_LIMIT = 100          # ↑ Увеличил с 50 до 100 пар
+
+def get_usdt_symbols():
+    """Получение только USDT пар с бирж"""
     symbols = set()
     for exchange in exchanges.values():
         try:
             markets = exchange.load_markets()
-            symbols.update(markets.keys())
+            # Берем только пары с /USDT
+            for symbol in markets.keys():
+                if symbol.endswith('/USDT'):
+                    symbols.add(symbol)
         except Exception as e:
             logger.error(f"Ошибка загрузки рынков с {exchange.name}: {e}")
     return list(symbols)
 
 async def fetch_ticker(exchange_name, symbol):
-    """Асинхронное получение тикера с объемом"""
+    """Асинхронное получение тикера"""
     exchange = exchanges[exchange_name]
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -100,8 +87,7 @@ async def fetch_ticker(exchange_name, symbol):
             'symbol': symbol,
             'bid': ticker['bid'] if ticker['bid'] else 0,
             'ask': ticker['ask'] if ticker['ask'] else 0,
-            'last': ticker['last'] if ticker['last'] else 0,
-            'quoteVolume': ticker['quoteVolume'] if ticker.get('quoteVolume') else 0,
+            'quoteVolume': ticker.get('quoteVolume', 0),
             'exchange': exchange_name
         }
     except Exception as e:
@@ -109,26 +95,18 @@ async def fetch_ticker(exchange_name, symbol):
         return None
 
 async def check_arbitrage_for_pair(symbol):
-    """Проверка арбитражных возможностей для конкретной пары"""
-    
-    # ----- ФИЛЬТР ПО НАЗВАНИЮ ПАРЫ -----
-    # ФИЛЬТР 1: Только пары с USDT
-    if not symbol.endswith('/USDT'):
-        return None  # Пропускаем пары типа BTC/ETH
-
-    # ФИЛЬТР 2: Исключаем левереджные токены (3S, 3L и т.д.)
+    """Проверка арбитражных возможностей"""
+    # Исключаем левереджные токены
     leveraged_keywords = ['3S', '3L', '5S', '5L', '10S', '10L', 'BEAR', 'BULL', 'UP', 'DOWN']
     if any(keyword in symbol.upper() for keyword in leveraged_keywords):
         return None
-    # ------------------------------------
     
-    tasks = []
-    for exchange_name in exchanges.keys():
-        tasks.append(fetch_ticker(exchange_name, symbol))
-    
+    # Получаем цены со всех бирж
+    tasks = [fetch_ticker(name, symbol) for name in exchanges.keys()]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    valid_prices = []
     
+    # Фильтруем валидные
+    valid_prices = []
     for result in results:
         if isinstance(result, dict) and result and result['bid'] > 0 and result['ask'] > 0:
             valid_prices.append(result)
@@ -136,50 +114,42 @@ async def check_arbitrage_for_pair(symbol):
     if len(valid_prices) < 2:
         return None
     
-    # Находим лучшие цены покупки и продажи
+    # Находим лучшие цены
     best_bid = max(valid_prices, key=lambda x: x['bid'])
     best_ask = min(valid_prices, key=lambda x: x['ask'])
     
     if best_bid['exchange'] == best_ask['exchange']:
         return None
     
-    # ----- ФИЛЬТР ПО ОБЪЕМУ -----
-    min_volume = 10000  # Минимальный объем = 10 000 USDT
-    if best_bid['quoteVolume'] < min_volume or best_ask['quoteVolume'] < min_volume:
+    # Фильтр по объёму
+    if best_bid['quoteVolume'] < MIN_VOLUME_USDT or best_ask['quoteVolume'] < MIN_VOLUME_USDT:
         return None
-    # ---------------------------
     
-    spread = best_bid['bid'] - best_ask['ask']
+    # Расчёт прибыли
+    buy_price = best_ask['ask']
+    sell_price = best_bid['bid']
+    spread = sell_price - buy_price
+    
     if spread <= 0:
         return None
     
-    profit_percentage = (spread / best_ask['ask']) * 100
+    profit_percentage = (spread / buy_price) * 100
     
-    # ----- ФИЛЬТР ПО ЦЕНЕ И ПРИБЫЛИ -----
-    min_price = 0.0005
-    max_price = 500000
-    buy_price = best_ask['ask']
-    sell_price = best_bid['bid']
-    if buy_price < min_price or sell_price < min_price or buy_price > max_price or sell_price > max_price:
+    # Основной фильтр по прибыли
+    if profit_percentage < MIN_PROFIT_PERCENT:
         return None
-
-    MAX_REASONABLE_PROFIT = 15.0  # Максимальный реалистичный спред (%)
-    if profit_percentage > MAX_REASONABLE_PROFIT:
-        return None
-    # ------------------------------------
     
-    # МИНИМАЛЬНЫЙ СПРЕД ДЛЯ ПОИСКА - 2.0%
-    MIN_PROFIT_PERCENTAGE = 2.0  # ← ЭТО ВАШЕ УСЛОВИЕ
-    if profit_percentage < MIN_PROFIT_PERCENTAGE:
+    # Фильтр нереалистичной прибыли
+    if profit_percentage > 10.0:
         return None
     
     return {
         'symbol': symbol,
         'buy_exchange': best_ask['exchange'],
-        'buy_price': best_ask['ask'],
-        'buy_volume': best_ask['quoteVolume'],
+        'buy_price': buy_price,
         'sell_exchange': best_bid['exchange'],
-        'sell_price': best_bid['bid'],
+        'sell_price': sell_price,
+        'buy_volume': best_ask['quoteVolume'],
         'sell_volume': best_bid['quoteVolume'],
         'profit': spread,
         'profit_percentage': profit_percentage,
@@ -187,110 +157,100 @@ async def check_arbitrage_for_pair(symbol):
     }
 
 async def check_arbitrage_opportunities(context: ContextTypes.DEFAULT_TYPE):
-    """Проверка арбитражных возможностей по всем парам"""
-    logger.info("Начинаю сканирование арбитражных возможностей...")
+    """Проверка арбитражных возможностей"""
+    logger.info("Начинаю сканирование...")
     
-    symbols = get_all_symbols()
-    logger.info(f"Всего пар для сканирования: {len(symbols)}")
+    # Получаем ТОЛЬКО USDT пары
+    symbols = get_usdt_symbols()
+    logger.info(f"USDT пар для сканирования: {len(symbols)}")
     
     opportunities = []
-    
-    # Ограничиваем количество пар для сканирования
-    symbols_to_scan = symbols[:50]  # Сканируем первые 50 пар для скорости
+    symbols_to_scan = symbols[:SCAN_LIMIT]  # Ограничиваем
     
     for symbol in symbols_to_scan:
         try:
             opportunity = await check_arbitrage_for_pair(symbol)
             if opportunity:
                 opportunities.append(opportunity)
-                logger.info(f"Найдена возможность: {opportunity}")
+                logger.info(f"Найдено: {opportunity['symbol']} - {opportunity['profit_percentage']:.2f}%")
         except Exception as e:
-            logger.error(f"Ошибка при проверке пары {symbol}: {e}")
+            logger.debug(f"Ошибка при проверке {symbol}: {e}")
     
     if opportunities:
-        # Сортируем по прибыльности
         opportunities.sort(key=lambda x: x['profit_percentage'], reverse=True)
-        
-        # Кэшируем лучшие возможности
         arbitrage_cache['last_scan'] = datetime.now().isoformat()
-        arbitrage_cache['opportunities'] = opportunities[:10]  # Сохраняем топ-10
+        arbitrage_cache['opportunities'] = opportunities[:10]
         
-        # Отправляем уведомления активным пользователям
         for user_id in active_users:
             try:
                 message = format_opportunities_message(opportunities[:5])
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message,
-                    parse_mode='HTML'
-                )
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='HTML')
             except Exception as e:
-                logger.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+                logger.error(f"Ошибка отправки {user_id}: {e}")
     
-    logger.info(f"Сканирование завершено. Найдено возможностей: {len(opportunities)}")
+    logger.info(f"Сканирование завершено. Найдено: {len(opportunities)}")
 
 def format_opportunities_message(opportunities):
-    """Форматирование сообщения с арбитражными возможностями (с объемом)"""
+    """Форматирование сообщения"""
     if not opportunities:
-        return "На данный момент арбитражных возможностей не найдено."
+        return "Арбитражных возможностей не найдено."
     
-    message = "🏆 <b>ТОП Арбитражных возможностей:</b>\n\n"
+    message = "🏆 <b>ТОП АРБИТРАЖЕЙ:</b>\n\n"
     
     for i, opp in enumerate(opportunities[:5], 1):
         message += (
             f"{i}. <b>{opp['symbol']}</b>\n"
             f"   📥 Купить на: {opp['buy_exchange'].upper()} - ${opp['buy_price']:.8f}\n"
             f"   📤 Продать на: {opp['sell_exchange'].upper()} - ${opp['sell_price']:.8f}\n"
-            f"   💰 Прибыль: ${opp['profit']:.8f} (<b>{opp['profit_percentage']:.2f}%</b>)\n"
-            f"   📊 Объем (24ч): Купить: ${opp['buy_volume']:.2f}, Продать: ${opp['sell_volume']:.2f}\n"
-            f"   ⏰ Время: {datetime.fromisoformat(opp['timestamp']).strftime('%H:%M:%S')}\n\n"
-            f"   💬 <b>Поддержка/Предложения по боту:</b> @ArbitrIP"  # ← ЗАМЕНИТЕ @МойUserName на ваш реальный юзернейм
+            f"   💰 Прибыль: <b>{opp['profit_percentage']:.2f}%</b>\n"
+            f"   📊 Объём: ${opp['buy_volume']:.0f} / ${opp['sell_volume']:.0f}\n"
+            f"   ⏰ {datetime.fromisoformat(opp['timestamp']).strftime('%H:%M:%S')}\n\n"
         )
     
+    message += f"<i>Настройки: прибыль >{MIN_PROFIT_PERCENT}%, объём >{MIN_VOLUME_USDT} USDT</i>"
     return message
 
+# Команды бота
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     user_id = update.effective_user.id
     
     if ADMIN_IDS and user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
+        await update.message.reply_text("⛔ Нет доступа.")
         return
     
     active_users.add(user_id)
-    
     welcome_text = (
-        "🤖 <b>Добро пожаловать в Arbitr Bot!</b>\n\n"
-        "Я сканирую криптобиржи в поисках арбитражных возможностей.\n\n"
-        "<b>Доступные команды:</b>\n"
+        "🤖 <b>Arbitr Bot v2</b>\n\n"
+        "Сканирую 4 биржи на арбитраж.\n"
+        f"• Минимальная прибыль: {MIN_PROFIT_PERCENT}%\n"
+        f"• Минимальный объём: {MIN_VOLUME_USDT} USDT\n"
+        f"• Сканирую: {SCAN_LIMIT} USDT пар\n\n"
+        "<b>Команды:</b>\n"
         "/scan - Ручное сканирование\n"
-        "/status - Статус бота\n"
-        "/help - Справка\n"
-        "/stop - Остановить уведомления\n\n"
-        "Автоматические уведомления включены."
+        "/status - Статус\n"
+        "/settings - Настройки\n"
+        "/stop - Остановить уведомления"
     )
     
     await update.message.reply_text(welcome_text, parse_mode='HTML')
     
-    # Запускаем периодическую проверку
     if 'job' not in context.chat_data:
         context.job_queue.run_repeating(
             check_arbitrage_opportunities,
-            interval=60.0,  # Проверка каждые 60 секунд
-            first=10.0,
+            interval=120.0,  # Увеличил до 120 секунд
+            first=5.0,
             chat_id=update.effective_chat.id
         )
         context.chat_data['job'] = True
 
 async def manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /scan"""
     user_id = update.effective_user.id
     
     if ADMIN_IDS and user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
+        await update.message.reply_text("⛔ Нет доступа.")
         return
     
-    await update.message.reply_text("🔍 Начинаю ручное сканирование...")
+    await update.message.reply_text("🔍 Сканирую...")
     
     try:
         await check_arbitrage_opportunities(context)
@@ -301,110 +261,81 @@ async def manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Арбитражных возможностей не найдено.")
     except Exception as e:
-        logger.error(f"Ошибка при ручном сканировании: {e}")
-        await update.message.reply_text(f"Ошибка при сканировании: {str(e)}")
+        logger.error(f"Ошибка сканирования: {e}")
+        await update.message.reply_text(f"Ошибка: {str(e)[:100]}")
 
 async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /status"""
     status_text = (
-        "📊 <b>Статус бота:</b>\n\n"
-        f"• Активных пользователей: {len(active_users)}\n"
-        f"• Отслеживаемых бирж: {len(exchanges)}\n"
-        f"• Последнее сканирование: {arbitrage_cache.get('last_scan', 'еще не было')}\n"
-        f"• Найдено возможностей: {len(arbitrage_cache.get('opportunities', []))}\n\n"
-        "<b>Статус бирж:</b>\n"
+        "📊 <b>Статус:</b>\n\n"
+        f"• Пользователей: {len(active_users)}\n"
+        f"• Бирж: {len(exchanges)}\n"
+        f"• Последнее сканирование: {arbitrage_cache.get('last_scan', 'нет')}\n"
+        f"• Возможностей в кэше: {len(arbitrage_cache.get('opportunities', []))}\n\n"
+        f"<b>Настройки:</b>\n"
+        f"• Прибыль: >{MIN_PROFIT_PERCENT}%\n"
+        f"• Объём: >{MIN_VOLUME_USDT} USDT\n"
+        f"• Пар за сканирование: {SCAN_LIMIT}\n"
+        f"• Интервал: 120 сек\n\n"
+        "<b>Биржи:</b>\n"
     )
     
-    for name, exchange in exchanges.items():
-        try:
-            # Быстрая проверка доступности биржи
-            exchange.fetch_ticker('BTC/USDT')
-            status_text += f"• {name.upper()}: ✅ Онлайн\n"
-        except:
-            status_text += f"• {name.upper()}: ❌ Оффлайн\n"
+    for name in exchanges.keys():
+        status_text += f"• {name.upper()}\n"
     
     await update.message.reply_text(status_text, parse_mode='HTML')
 
+async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings_text = (
+        "⚙️ <b>Текущие настройки:</b>\n\n"
+        f"• MIN_PROFIT_PERCENT = {MIN_PROFIT_PERCENT}%\n"
+        f"• MIN_VOLUME_USDT = {MIN_VOLUME_USDT}\n"
+        f"• SCAN_LIMIT = {SCAN_LIMIT} пар\n"
+        f"• Биржи: {', '.join(exchanges.keys())}\n\n"
+        "<i>Чтобы изменить, отредактируйте переменные в коде.</i>"
+    )
+    await update.message.reply_text(settings_text, parse_mode='HTML')
+
 async def stop_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /stop"""
     user_id = update.effective_user.id
     if user_id in active_users:
         active_users.remove(user_id)
-        await update.message.reply_text("🔕 Уведомления отключены. Используйте /start для возобновления.")
+        await update.message.reply_text("🔕 Уведомления отключены. /start для возобновления.")
     else:
         await update.message.reply_text("Уведомления уже отключены.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
-    help_text = (
-        "📚 <b>Справка по Arbitr Bot</b>\n\n"
-        "<b>Команды:</b>\n"
-        "/start - Запустить бота и начать получать уведомления\n"
-        "/scan - Ручное сканирование арбитражных возможностей\n"
-        "/status - Показать статус бота и бирж\n"
-        "/stop - Остановить автоматические уведомления\n"
-        "/help - Показать эту справку\n\n"
-        "<b>Как это работает:</b>\n"
-        "Бот автоматически сканирует цены на различных криптобиржах "
-        "и находит разницы в ценах (арбитраж). При обнаружении прибыльной "
-        "возможности (более 2.0%) отправляется уведомление.\n\n"
-        "<b>Отслеживаемые биржи:</b>\n"
-        "• KuCoin\n• Bitrue\n• Bitmart\n• Gate.io\n• Poloniex\n\n"
-        "⏰ Автоматическое сканирование происходит каждые 60 секунд.\n\n"
-        "💬 <b>Поддержка/Предложения по боту:</b> @ArbitrIP"  # Ваша строка добавлена сюда
-    )
-    await update.message.reply_text(help_text, parse_mode='HTML')
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка при обработке обновления: {context.error}")
-    
-    if update and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "⚠️ Произошла ошибка. Попробуйте позже или свяжитесь с администратором."
-            )
-        except:
-            pass
+    logger.error(f"Ошибка: {context.error}")
 
 async def post_init(application):
-    """Функция, выполняемая после инициализации бота"""
-    logger.info("Бот успешно инициализирован и готов к работе!")
+    logger.info("Бот инициализирован!")
 
 def main():
-    """Основная функция запуска бота"""
-    logger.info("Инициализация бота...")
+    logger.info("Запуск бота...")
     
     if not BOT_TOKEN:
-        logger.error("Токен бота не найден! Убедитесь, что BOT_TOKEN установлен в переменных окружения.")
-        print("Установите переменную окружения BOT_TOKEN на Railway!")
-        print("Перейдите в Settings -> Variables и добавьте BOT_TOKEN")
+        logger.error("Нет токена!")
         sys.exit(1)
     
     try:
-        # Создаем приложение
         application = ApplicationBuilder() \
             .token(BOT_TOKEN) \
             .post_init(post_init) \
             .build()
         
-        # Добавляем обработчики команд
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("scan", manual_scan))
         application.add_handler(CommandHandler("status", bot_status))
+        application.add_handler(CommandHandler("settings", show_settings))
         application.add_handler(CommandHandler("stop", stop_notifications))
-        application.add_handler(CommandHandler("help", help_command))
         
-        # Добавляем обработчик ошибок
         application.add_error_handler(error_handler)
         
-        logger.info("Бот запущен и ожидает команды...")
-        
-        # Запускаем бота
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Бот запущен...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES, 
+                                close_loop=False)  # Важно для Render
         
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        logger.error(f"Критическая ошибка: {e}")
         raise
 
 if __name__ == '__main__':
