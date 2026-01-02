@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
 import aiohttp
+# Добавьте эти две строки к остальным импортам в самом верху
+from flask import Flask
+import threading
 from typing import Dict, List, Optional
 
 # ==================== НАСТРОЙКИ ====================
@@ -17,6 +20,26 @@ SCAN_LIMIT = 100                # Сканировать 100 USDT пар
 SCAN_INTERVAL = 60              # Интервал 60 секунд
 MAX_CONCURRENT_REQUESTS = 20    # Максимум одновременных запросов к биржам
 # ==================================================
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ НЕ УБИВАЛ ПРОЦЕСС) ==========
+web_app = Flask(__name__)
+@web_app.route('/')
+def home():
+    return "✅ Arbitr Bot is running"
+@web_app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web_server():
+    """Запускает Flask-сервер в отдельном потоке"""
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+# Автоматически запускаем веб-сервер при импорте (для Render)
+if __name__ != '__main__':
+    server_thread = threading.Thread(target=run_web_server, daemon=True)
+    server_thread.start()
+    logger.info(f"🌐 Фоновый веб-сервер запущен для порта {os.getenv('PORT', 10000)}")
+# ====================================================================
 
 # Настройка логирования
 logging.basicConfig(
